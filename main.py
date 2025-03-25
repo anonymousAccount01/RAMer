@@ -10,39 +10,20 @@ import random
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import time
-import collections
 import argparse     
 from models.models import *
 from models.optimization import BertAdam
 from utils.eval import get_metrics
 from torch.utils.data import DataLoader
-from parse_config import ConfigParser
 
 from utils.util import get_logger, create_dataloader
-from dataloaders.cmu_dataloader import AlignedMoseiDataset, UnAlignedMoseiDataset
+from dataloaders.cmu_dataloader import AlignedMoseiDataset, UnAlignedMoseiDataset, M3EDDataset
 import pdb
 
 
 # Move the assignment of logger before the global declaration
 # logger = None
 global logger
-def read_json(file_path):
-    with open(file_path, 'r') as file:
-        return json.load(file)
-
-def update_nested_config(config, args):
-    # Update the config with arguments passed from command line
-    for key, value in vars(args).items():
-        if value is not None:  # Only update if value is provided from the command line
-            keys = key.split('.')
-            sub_config = config
-            for k in keys[:-1]:
-                if k not in sub_config:
-                    sub_config[k] = {}
-                sub_config = sub_config[k]
-            sub_config[keys[-1]] = value
-    return config
-
 def get_args(description='Multi-modal Multi-label Emotion Recognition'):
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument('-c', '--config', default=None, type=str, help='config file path (default: None)')
@@ -59,9 +40,9 @@ def get_args(description='Multi-modal Multi-label Emotion Recognition'):
     parser.add_argument('--batch_size', type=int, default=64, help='batch size')
     parser.add_argument('--lr_decay', type=float, default=0.9, help='Learning rate exp epoch decay') 
     parser.add_argument('--n_display', type=int, default=10, help='Information display frequence')
-    parser.add_argument('--text_dim', type=int, default=1024, help='text_feature_dimension') 
-    parser.add_argument('--video_dim', type=int, default=4302, help='video feature dimension')
-    parser.add_argument('--audio_dim', type=int, default=6373, help='audio_feature_dimension') 
+    parser.add_argument('--text_dim', type=int, default=300, help='text_feature_dimension') 
+    parser.add_argument('--video_dim', type=int, default=35, help='video feature dimension')
+    parser.add_argument('--audio_dim', type=int, default=74, help='audio_feature_dimension') 
     parser.add_argument('--seed', type=int, default=1, help='random seed')
     parser.add_argument('--id', type=int, default=0, help='random seed')
     parser.add_argument("--text_model", default="configs", type=str, required=False, help="text module")
@@ -79,14 +60,15 @@ def get_args(description='Multi-modal Multi-label Emotion Recognition'):
     parser.add_argument('--text_num_hidden_layers', type=int, default=6, help="Layer NO. of visual.")
     parser.add_argument('--visual_num_hidden_layers', type=int, default=3, help="Layer NO. of visual.")
     parser.add_argument('--audio_num_hidden_layers', type=int, default=3, help="Layer No. of audio")
-    parser.add_argument("--num_classes", default=9, type=int, required=False, help="9 if config['emo_type'] == 'primary' else 14")
+    parser.add_argument("--num_classes", default=6, type=int, required=False)
     parser.add_argument("--hidden_size",type=int, default=256)
     parser.add_argument("--proj_size", type=int, default=64)
     parser.add_argument('--gpu_id', default='0', type=str)
     parser.add_argument('--proto_m', default=0.99, type=float, help='momentum for computing the momving average of prototypes')
-    parser.add_argument('--lsr_clf_weight', type=float, default=1.0)
-    parser.add_argument('--recon_clf_weight', type=float, default=1.0)
-    parser.add_argument('--aug_clf_weight', type=float, default=1.0)
+    parser.add_argument('--lsr_clf_weight', type=float, default=0.01)
+    parser.add_argument('--recon_clf_weight', type=float, default=1.0) #1.0
+    parser.add_argument('--aug_clf_weight', type=float, default=0.1)
+    parser.add_argument('--beta_clf_weight', type=float, default=1.0)
     parser.add_argument('--cl_weight', type=float, default=1.0)
     parser.add_argument('--aug_mse_weight', type=float, default=1.0)
     parser.add_argument('--beta_mse_weight', type=float, default=1.0)
@@ -94,61 +76,58 @@ def get_args(description='Multi-modal Multi-label Emotion Recognition'):
     parser.add_argument('--lsr_vae_weight', type=float, default=1.0)
     parser.add_argument('--total_aug_clf_weight', type=float, default=1.0)
     parser.add_argument('--shuffle_aug_clf_weight', type=float, default=1.0)
+    parser.add_argument('--com_pri_weight', type=float, default=0.01)
+    parser.add_argument('--diff_weight', type=float, default=5e-6)
+    parser.add_argument('--cml_weight', type=float, default=0.5)
     parser.add_argument('--moco_queue', type=int, default=8192)
-    parser.add_argument('--binary_threshold', type=float, default=0.35) #0.35
+    parser.add_argument('--binary_threshold', type=float, default=0.35)
     parser.add_argument('--unaligned_mask_same_length', action='store_true')
+    parser.add_argument('--save_sub_tensor', action='store_true')
+    parser.add_argument('--save_sub_tensor_rec', action='store_true')
+    parser.add_argument('--comp_adv_loss', action='store_true')
+    parser.add_argument('--comp_rec_loss', action='store_true')
+
 
 
     args = parser.parse_args()
-    # Load config file
-    if args.config:
-        print("Loading config from {}".format(args.config))
-        config = read_json(args.config)
-    else:
-        config = {}
-
-    # Update config with command line arguments
-    config = update_nested_config(config, args)
-
     # Check paramenters
-    if config['gradient_accumulation_steps'] < 1: 
+    if args.gradient_accumulation_steps < 1: 
         raise ValueError("Invalid gradient_accumulation_steps parameter: {}, should be >= 1".format(
-            config['gradient_accumulation_steps']))
-    if not config['do_train'] and not config['do_test']:
+            args.gradient_accumulation_steps))
+    if not args.do_train and not args.do_test:
         raise ValueError("At least one of `do_train` or `do_test` must be True.")
 
-    config['batch_size'] = int(config['batch_size'] / config['gradient_accumulation_steps'])
+    args.batch_size = int(args.batch_size / args.gradient_accumulation_steps)
 
-    if args.num_classes==9:
-        output_path = os.path.join(config['output_dir'], 'primary')
-    elif args.num_classes==14:
-        output_path = os.path.join(config['output_dir'], 'fine_grained')
-
-    output_path = os.path.join(output_path, 'ramer_sd{}_t{}_id{}'.format(config['seed'], config['binary_threshold'], config['id']))
-    config['output_dir'] = output_path
-
-    # Print the final configuration
-    # print(json.dumps(config, indent=4))
-    # pdb.set_trace()
-    return config
+    if args.aligned:
+        output_path = os.path.join(args.output_dir, 'aligned')
+    else:
+        output_path = os.path.join(args.output_dir, 'unaligned')
+        if args.unaligned_mask_same_length:
+            output_path = os.path.join(output_path, 'same_length')
+        else:
+            output_path = os.path.join(output_path, 'not_same_length')
+    output_path = os.path.join(output_path, 'ramer_sd{}_t{}_id{}'.format(args.seed, args.binary_threshold, args.id))
+    args.output_dir = output_path
+    return args
 
 
 def set_seed_logger(args): 
     global logger
     # predefining random initial seeds
-    random.seed(args['seed'])
-    os.environ['PYTHONHASHSEED'] = str(args['seed'])
-    os.environ['CUDA_VISIBLE_DEVICES'] = args['gpu_id']
-    np.random.seed(args['seed'])
-    torch.manual_seed(args['seed'])
-    torch.cuda.manual_seed(args['seed'])
-    torch.cuda.manual_seed_all(args['seed'])  # if you are using multi-GPU.
+    random.seed(args.seed)
+    os.environ['PYTHONHASHSEED'] = str(args.seed)
+    os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu_id
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)  # if you are using multi-GPU.
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True  
-    torch.cuda.set_device(args['local_rank']) 
-    if not os.path.exists(args['output_dir']):
-        os.makedirs(args['output_dir'], exist_ok=True)
-    logger = get_logger(os.path.join(args['output_dir'], "log.txt"))
+    torch.cuda.set_device(args.local_rank) 
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir, exist_ok=True)
+    logger = get_logger(os.path.join(args.output_dir, "log.txt"))
     return args
 
 
@@ -157,10 +136,10 @@ def init_device(args, local_rank):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu", local_rank)
     n_gpu = 1
     logger.info("device: {} n_gpu: {}".format(device, n_gpu))
-    args['n_gpu'] = n_gpu
-    if args['batch_size'] % args['n_gpu'] != 0: 
+    args.n_gpu = n_gpu
+    if args.batch_size % args.n_gpu != 0: 
         raise ValueError("Invalid batch_size/batch_size_val and n_gpu parameter: {}%{} and {}%{}, should be == 0".format(
-            args['batch_size'], args['n_gpu'], args['batch_size_val'], args['n_gpu']))
+            args.batch_size, args.n_gpu, args.batch_size_val, args.n_gpu))
     return device, n_gpu
 
 
@@ -176,31 +155,34 @@ def prep_optimizer(args, model, num_train_optimization_steps):
     decay_bert_param_tp = [(n, p) for n, p in decay_param_tp if "audio." in n]
     decay_nobert_param_tp = [(n, p) for n, p in decay_param_tp if "audio." not in n]
     optimizer_grouped_parameters = [
-        {'params': [p for n, p in no_decay_bert_param_tp], 'weight_decay': 0.01, 'lr': args['lr'] * 1.0},
+        {'params': [p for n, p in no_decay_bert_param_tp], 'weight_decay': 0.01, 'lr': args.lr * 1.0},
         {'params': [p for n, p in no_decay_nobert_param_tp], 'weight_decay': 0.01},
-        {'params': [p for n, p in decay_bert_param_tp], 'weight_decay': 0.0, 'lr': args['lr'] * 1.0},
+        {'params': [p for n, p in decay_bert_param_tp], 'weight_decay': 0.0, 'lr': args.lr * 1.0},
         {'params': [p for n, p in decay_nobert_param_tp], 'weight_decay': 0.0}
     ]
     scheduler = None
-    optimizer = BertAdam(optimizer_grouped_parameters, lr=args['lr'], warmup=args['warmup_proportion'],
+    optimizer = BertAdam(optimizer_grouped_parameters, lr=args.lr, warmup=args.warmup_proportion,
                          schedule='warmup_linear', t_total=num_train_optimization_steps, weight_decay=0.01,
                          max_grad_norm=1.0)
     return optimizer, scheduler, model
 
 def prep_dataloader(args):
-    Dataset = AlignedMoseiDataset if args['aligned'] else UnAlignedMoseiDataset
+    if 'm3ed' in args.data_path:
+        Dataset = M3EDDataset
+    else:
+        Dataset = AlignedMoseiDataset if args.aligned else UnAlignedMoseiDataset
     train_dataset = Dataset(
-        args['data_path'],
+        args.data_path,
         'train',
         args
     )
     val_dataset = Dataset(
-        args['data_path'],
+        args.data_path,
         'valid',
         args
     )
     test_dataset = Dataset(
-        args['data_path'],
+        args.data_path,
         'test',
          args
     )
@@ -214,24 +196,24 @@ def prep_dataloader(args):
     label_input, label_mask = train_dataset._get_label_input()
     train_dataloader = DataLoader(
         train_dataset,
-        batch_size=args['batch_size'] // args['n_gpu'],
-        num_workers=args['num_thread_reader'],
+        batch_size=args.batch_size // args.n_gpu,
+        num_workers=args.num_thread_reader,
         pin_memory=False,
         shuffle=True,
         drop_last=True
     )
     val_dataloader = DataLoader(
         val_dataset,
-        batch_size=args['batch_size'] // args['n_gpu'],
-        num_workers=args['num_thread_reader'],
+        batch_size=args.batch_size // args.n_gpu,
+        num_workers=args.num_thread_reader,
         pin_memory=False,
         shuffle=True,
         drop_last=True   
     )
     test_dataloader = DataLoader(
         test_dataset,
-        batch_size=args['batch_size'] // args['n_gpu'],
-        num_workers=args['num_thread_reader'],
+        batch_size=args.batch_size // args.n_gpu,
+        num_workers=args.num_thread_reader,
         pin_memory=False,
         shuffle=False,
         # drop_last=True
@@ -244,19 +226,17 @@ def save_model(args, model, epoch):
     # Only save the model it-self
     model_to_save = model.module if hasattr(model, 'module') else model
     output_model_file = os.path.join(
-        args['output_dir'], "pytorch_model_{}.bin.".format(epoch))
+        args.output_dir, "pytorch_model_{}.bin.".format(epoch))
     torch.save(model_to_save.state_dict(), output_model_file)
     logger.info("Model saved to %s", output_model_file)
     return output_model_file
 
-def load_model(epoch, args, n_gpu, device, model_file=None):
-    if model_file is None or len(model_file) == 0:
-        model_file = os.path.join(args.output_dir, "pytorch_model_{}.bin.".format(epoch-1))
+def load_model(args, n_gpu, device, model_file=None):
     if os.path.exists(model_file):
         model_state_dict = torch.load(model_file, map_location='cpu')
-        if args['local_rank'] == 0:
+        if args.local_rank == 0:
             logger.info("Model loaded from %s", model_file)
-        model = RAMer.from_pretrained(args['text_model'], args['visual_model'], args['audio_model'], args['personality_model'],
+        model = RAMer.from_pretrained(args.text_model, args.visual_model, args.audio_model, args.personality_model,
                                        state_dict=model_state_dict, task_config=args)
         model.to(device)
     else:
@@ -266,7 +246,7 @@ def load_model(epoch, args, n_gpu, device, model_file=None):
 def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, scheduler, global_step, local_rank=0, label_input=None, label_mask=None):
     global logger
     model.train()
-    log_step = args['n_display']
+    log_step = args.n_display
     total_loss = 0
     total_pred = []
     total_true_label = []
@@ -277,33 +257,22 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
             # multi-gpu does scattering it-self
             batch = tuple(t.to(device=device, non_blocking=True) for t in batch)
 
-        # pairs_text, pairs_mask, video, video_mask, audio, audio_mask, ground_label = batch
-        ground_label, visual,audio,text,personality, visual_mask, audio_mask,text_mask, personality_mask, target_loc, umask, seg_len, n_c = batch
-        # print(f'current batch_idx: {step}, ground_label: {ground_label}, visual: {visual}')
-        # print(f'ground label shape: {ground_label.shape}, visual shape: {visual.shape}, audio shape:{audio.shape} ,text shape:{text.shape},personality shape:{personality.shape}, personality_mask shape: {personality_mask.shape}')
-        # print(f'visual_mask shape: {visual_mask.shape}, audio_mask shape: {audio_mask.shape}, text_mask shape: {text_mask.shape}')
-        
-        seq_lengths = [(umask[j] == 1).nonzero().tolist()[-1][0] + 1 for j in range(len(umask))]
-        multi_hot_labels = torch.zeros((ground_label.size(0), args['num_classes']), device=ground_label.device)
-        for i in range(ground_label.size(0)):
-            for label in ground_label[i]:
-                if label != -1:
-                    multi_hot_labels[i, label] = 1
-        # print(f'seq_lengths: {seq_lengths}, multi_hot_labels: {multi_hot_labels}')
+        pairs_text, pairs_mask, video, video_mask, audio, audio_mask, ground_label = batch
+        # ground_label, visual,audio,text,personality, visual_mask, audio_mask,text_mask, personality_mask, target_loc, umask, seg_len, n_c = batch
+        # print(f'current batch_idx: {step},current data: {batch}')
         # pdb.set_trace()
-        # model_loss, batch_pred, true_label, pred_scores = model(video,audio,pairs_text,video_mask,audio_mask,pairs_mask, groundTruth_labels=ground_label, training=True)
-        model_loss, batch_pred, true_label, pred_scores = model(visual,audio,text,visual_mask,audio_mask,text_mask, seq_lengths, target_loc, seg_len, n_c,
-                                                                personality=personality,personality_mask=personality_mask,groundTruth_labels=multi_hot_labels, training=True)
+        # seq_lengths = [(umask[j] == 1).nonzero().tolist()[-1][0] + 1 for j in range(len(umask))]
+        model_loss, batch_pred, true_label, pred_scores = model(video,audio,pairs_text,video_mask,audio_mask,pairs_mask, groundTruth_labels=ground_label, training=True)
         if n_gpu > 1:
             model_loss = model_loss.mean()  # mean() to average on multi-gpu.
-        if args['gradient_accumulation_steps'] > 1:
-            model_loss = model_loss / args['gradient_accumulation_steps']
+        if args.gradient_accumulation_steps > 1:
+            model_loss = model_loss / args.gradient_accumulation_steps
         model_loss.backward()
         total_loss += float(model_loss)
         total_pred.append(batch_pred)
         total_true_label.append(true_label)
         total_pred_scores.append(pred_scores)
-        if (step + 1) % args['gradient_accumulation_steps'] == 0:
+        if (step + 1) % args.gradient_accumulation_steps == 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             if scheduler is not None:
                 scheduler.step()  # Update learning rate schedule
@@ -312,7 +281,7 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
             global_step += 1
             if global_step % log_step == 0 and local_rank == 0:
                 logger.info("Epoch: %d/%d, Step: %d/%d, Lr: %s, loss: %f", epoch + 1,
-                            args['epochs'], step + 1,
+                            args.epochs, step + 1,
                             len(train_dataloader),
                             "-".join([str('%.6f'%itm) for itm in sorted(list(set(optimizer.get_lr())))]),
                             float(model_loss))
@@ -323,7 +292,7 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
     return total_loss, total_pred, total_true_label, total_pred_scores
 
 
-def eval_epoch(args, model, val_dataloader, device, n_gpu, label_input=None, label_mask=None):
+def eval_epoch(args, model, val_dataloader, device, n_gpu, label_input, label_mask, do_save=False):
     if hasattr(model, 'module'):
         model = model.module.to(device)
     else:
@@ -333,27 +302,53 @@ def eval_epoch(args, model, val_dataloader, device, n_gpu, label_input=None, lab
         total_pred = []
         total_true_label = []
         total_pred_scores = []
+        total_save_tensor = []
+        total_max_idx_1 = []
+        total_max_idx_3 = []
+        total_max_idx_4 = []
         for _, batch in enumerate(val_dataloader):
             batch = tuple(t.to(device) for t in batch)
-            # text, text_mask, video, video_mask, audio, audio_mask, groundTruth_labels = batch
-            ground_label, visual,audio,text,personality, visual_mask, audio_mask,text_mask, personality_mask, target_loc, umask, seg_len, n_c = batch
-            seq_lengths = [(umask[j] == 1).nonzero().tolist()[-1][0] + 1 for j in range(len(umask))]
-            multi_hot_labels = torch.zeros((ground_label.size(0), args['num_classes']), device=ground_label.device)
-            for i in range(ground_label.size(0)):
-                for label in ground_label[i]:
-                    if label != -1:
-                        multi_hot_labels[i, label] = 1
-            # return_list = model(video,audio,text, video_mask, audio_mask,text_mask,  
-            #                                             label_input, label_mask, groundTruth_labels=groundTruth_labels, training=False)
-            return_list = model(visual,audio,text,visual_mask,audio_mask,text_mask, seq_lengths, target_loc, seg_len, n_c,
-                                                                personality=personality,personality_mask=personality_mask,groundTruth_labels=multi_hot_labels, training=False)
-        
-            batch_pred, true_label, pred_scores = return_list
+            # ground_label, visual,audio,text,personality, visual_mask, audio_mask,text_mask, personality_mask, target_loc, umask, seg_len, n_c = batch
+            # seq_lengths = [(umask[j] == 1).nonzero().tolist()[-1][0] + 1 for j in range(len(umask))]
+            # return_list = model(visual,audio,text,personality, visual_mask, audio_mask,text_mask, personality_mask,
+            #                                                     seq_lengths, target_loc, seg_len, n_c, groundTruth_labels=ground_label, training=False)
+            text, text_mask, video, video_mask, audio, audio_mask, groundTruth_labels = batch
+            return_list = model(video,audio,text, video_mask, audio_mask,text_mask,  
+                                                        label_input, label_mask, groundTruth_labels=groundTruth_labels, training=False)
+            # batch_pred, true_label, pred_scores = return_list
+            if args.save_sub_tensor:
+                batch_pred, true_label, pred_scores, norm_tensor, max_idx_list = return_list
+                total_save_tensor.append(norm_tensor)
+                # print(norm_tensor.shape)
+                total_max_idx_1.append(max_idx_list[0])
+                total_max_idx_3.append(max_idx_list[1])
+                total_max_idx_4.append(max_idx_list[2])
+            else:
+                batch_pred, true_label, pred_scores = return_list
             total_true_label.append(true_label)
             total_pred.append(batch_pred)
             total_pred_scores.append(pred_scores)
         total_pred = torch.cat(total_pred, 0)
         total_true_label = torch.cat(total_true_label, 0)
+        if do_save and args.save_sub_tensor:
+            total_save_tensor = torch.cat(total_save_tensor, 0)
+            # print(total_save_tensor.shape)
+            # print(total_true_label.shape)
+
+            total_max_idx_1 = torch.cat(total_max_idx_1, 0)
+            total_max_idx_3 = torch.cat(total_max_idx_3, 0)
+            total_max_idx_4 = torch.cat(total_max_idx_4, 0)
+            print(total_max_idx_1.shape)
+            gt_label_path = os.path.join(args.output_dir, 'gt_labels_wo_adv.pt')
+            sub_tensor_path = os.path.join(args.output_dir, 'sub_tensor_wo_adv.pt')
+            max_1_path = os.path.join(args.output_dir, 'max_1_wo_adv.pt')
+            torch.save(total_max_idx_1.cpu(), max_1_path)
+            max_3_path = os.path.join(args.output_dir, 'max_3_wo_adv.pt')
+            torch.save(total_max_idx_3.cpu(), max_3_path)
+            max_4_path = os.path.join(args.output_dir, 'max_4_wo_adv.pt')
+            torch.save(total_max_idx_4.cpu(), max_4_path)
+            torch.save(total_true_label.cpu(), gt_label_path)
+            torch.save(total_save_tensor.cpu(), sub_tensor_path)
         total_pred_scores = torch.cat(total_pred_scores, 0)
         return total_pred, total_true_label, total_pred_scores
            
@@ -361,11 +356,9 @@ def main():
     global logger
     args = get_args()
     args = set_seed_logger(args)
-    device, n_gpu = init_device(args, args['local_rank'])
-    print(f"device: {device}, n_gpu: {n_gpu}")
-    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+    device, n_gpu = init_device(args, args.local_rank)
 
-    model = RAMer.from_pretrained(args['text_model'], args['visual_model'], args['audio_model'], args['personality_model'],
+    model = RAMer.from_pretrained(args.text_model, args.visual_model, args.audio_model, args.personality_model,
                                        task_config=args)
     # print the content of args
     # print("the content of args:",args)
@@ -374,67 +367,62 @@ def main():
     # pdb.set_trace()
     model = model.to(device)
 
-    if args['do_train']:
-        # train_dataloader, val_dataloader, test_dataloader, label_input, label_mask = prep_dataloader(args)
-        data_loader = create_dataloader(args)
+    if args.do_train:
+        train_dataloader, val_dataloader, test_dataloader, label_input, label_mask = prep_dataloader(args)
+        # data_loader = create_dataloader(args)
         # valid_data_loader = data_loader.split_validation()
-        valid_data_loader = None
-        print(f"train data_loader: {len(data_loader)}", f"valid data_loader: {len(valid_data_loader)}")
+        # print(f"train data_loader: {len(train_dataloader)}", f"valid data_loader: {len(val_dataloader)}")
         # pdb.set_trace()
-        # label_input = label_input.to(device)
-        # label_mask = label_mask.to(device)
-        num_train_optimization_steps = (int(len(data_loader) + args['gradient_accumulation_steps'] - 1)
-                                        / args['gradient_accumulation_steps']) * args['epochs']
+        label_input = label_input.to(device)
+        label_mask = label_mask.to(device)
+        num_train_optimization_steps = (int(len(train_dataloader) + args.gradient_accumulation_steps - 1)
+                                        / args.gradient_accumulation_steps) * args.epochs
 
         optimizer, scheduler, model = prep_optimizer(args, model, num_train_optimization_steps)
 
-        if args['local_rank'] == 0:
+        if args.local_rank == 0:
             logger.info("***** Running training *****")
-            logger.info("  Num steps = %d", num_train_optimization_steps * args['gradient_accumulation_steps'])
+            logger.info("  Num steps = %d", num_train_optimization_steps * args.gradient_accumulation_steps)
 
         # print(f"current model: {model}", f"current optimizer: {optimizer}", f"current scheduler: {scheduler}, device: {device}")
         best_score = 0.000
         best_output_model_file = None
         global_step = 0
-        for epoch in range(args['epochs']):
-            total_loss, total_pred, total_label, total_pred_scores = train_epoch(epoch, args, model, data_loader, device, n_gpu, optimizer,
-                                                scheduler, global_step, local_rank=args['local_rank'])
-            if args['local_rank'] == 0:
+        for epoch in range(args.epochs):
+            total_loss, total_pred, total_label, total_pred_scores = train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer,
+                                                scheduler, global_step, local_rank=args.local_rank, label_input=label_input, label_mask=label_mask)
+            if args.local_rank == 0:
                 logger.info("Epoch %d/%d Finished, Train Loss: %f.",
-                            epoch + 1, args['epochs'], total_loss)
+                            epoch + 1, args.epochs, total_loss)
 
-            total_micro_f1,  total_macro_f1,total_weighted_f1,total_micro_precision, total_micro_recall, total_acc = get_metrics(total_pred, total_label)
-            if args['local_rank'] == 0:
-                logger.info(" res: Train_micro_f1 %f,Train_macro_f1: %f, Train_weighted_f1: %f, \tp %f,\tr %f,\tacc %f.", total_micro_f1,  total_macro_f1,total_weighted_f1,total_micro_precision, total_micro_recall, total_acc)
-            if args['local_rank'] == 0 and valid_data_loader is not None:
+            total_micro_f1, total_micro_precision, total_micro_recall, total_acc = get_metrics(total_pred, total_label)
+            if args.local_rank == 0:
+                logger.info(" res: f1 %f,\tp %f,\tr %f,\tacc %f.", total_micro_f1, total_micro_precision, total_micro_recall, total_acc)
+            if args.local_rank == 0:
                 logger.info("***** Running valing *****")
-                val_pred, val_label, val_pred_scores = eval_epoch(args, model, valid_data_loader, device, n_gpu)
-                val_micro_f1, val_macro_f1,val_weighted_f1,val_micro_precision, val_micro_recall, val_acc = get_metrics(val_pred, val_label)
+                val_pred, val_label, val_pred_scores = eval_epoch(args, model, val_dataloader, device, n_gpu,
+                                                                  label_input, label_mask)
+                val_micro_f1, val_micro_precision, val_micro_recall, val_acc = get_metrics(val_pred, val_label)
                 comp_score = val_micro_f1
-                logger.info(" res: val_micro_f1 %f,val_macro_f1: %f, val_weighted_f1: %f, \tp %f,\tr %f,\tacc %f.",
-                            val_micro_f1, val_macro_f1,val_weighted_f1,val_micro_precision, val_micro_recall, val_acc)
+                logger.info(" res: f1 %f,\tp %f,\tr %f,\tacc %f.",
+                            val_micro_f1, val_micro_precision, val_micro_recall, val_acc)
                 output_model_file = save_model(args, model, epoch)
                 if best_score <= comp_score:
                     best_score = comp_score
                     best_output_model_file = output_model_file
                 logger.info("The best model is: {}, the f1 is: {:.4f}".format(best_output_model_file, best_score))
-    elif args['do_test']:
-        # best_output_model_file = os.path.join(args['output_dir'], "pytorch_model_{}.bin.".format(args['epochs'] - 1))
-        # best_model = load_model(args, n_gpu, device, model_file=best_output_model_file)
-        # print(f"best model: {best_model}, best_output_model_file: {best_output_model_file}")
-        test_dataloader = create_dataloader(args)
-        print(f"test data_loader: {len(test_dataloader)},n_samples:{len(test_dataloader.sampler)}")
-
-        if args['local_rank'] == 0:
+        if args.local_rank == 0:
             logger.info('***** Running testing *****')
-            print(f"current model dir: {args['output_dir']}," f"current model epoch: {args['epochs']}")
-            best_output_model_file = os.path.join(args['output_dir'], "pytorch_model_{}.bin.".format(args['epochs'] - 1))
-            best_model = load_model(args['epochs'], args, n_gpu, device, model_file=best_output_model_file)
-            test_pred, test_label, test_pred_scores = eval_epoch(args, best_model, test_dataloader,
-                                                                           device, n_gpu)
-            test_micro_f1,  test_macro_f1,test_weighted_f1,test_micro_precision, test_micro_recall, test_acc = get_metrics(test_pred, test_label)
-            logger.info(" res: test_micro_f1 %f,test_macro_f1: %f, test_weighted_f1: %f, \tp %f,\tr %f,\tacc %f",
-                        test_micro_f1,  test_macro_f1,test_weighted_f1,test_micro_precision, test_micro_recall, test_acc)
+            best_model = load_model(args, n_gpu, device, model_file=best_output_model_file)
+            if args.save_sub_tensor:
+                test_pred, test_label, test_pred_scores = eval_epoch(args, best_model, test_dataloader,
+                                                                               device, n_gpu, label_input, label_mask, do_save=True)
+            else:
+                test_pred, test_label, test_pred_scores = eval_epoch(args, best_model, test_dataloader,
+                                                                            device, n_gpu, label_input, label_mask)
+            test_micro_f1, test_micro_precision, test_micro_recall, test_acc = get_metrics(test_pred, test_label)
+            logger.info(" res: f1 %f,\tp %f,\tr %f,\tacc %f",
+                        test_micro_f1, test_micro_precision, test_micro_recall, test_acc)
 
       
 if __name__ == "__main__":
