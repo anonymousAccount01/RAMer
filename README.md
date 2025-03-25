@@ -1,19 +1,19 @@
 # RAMer: Reconstruction-based Adversarial Model for Multi-party Multi-model Multi-label Emotion Recognition
 
-This is an anonymous repository for double-blind manuscript review, and the source code for reproducing our experiments will be released upon acceptance of the paper.
+This is an anonymous repository for double-blind manuscript review.
 
 ## TODO List
 
-- [ ] [Overview](#overview)  
+- [x] [Overview](#overview)  
   - The model framework.
 
-- [ ] [Requirements](#requirements)
+- [x] [Requirements](#requirements)
   - List all dependencies and libraries required to run the code.
 
-- [ ] [Training](#training)  
+- [x] [Training](#training)  
   - Provide instructions on how to train the model, including command examples and parameter explanations.
 
-- [ ] [Evaluation](#evaluation)  
+- [x] [Evaluation](#evaluation)  
   - Explain the evaluation process and provide examples of how to evaluate the model's performance.
 
 ## Overview
@@ -34,7 +34,7 @@ pip install -r requirements.txt
 To train the model(s) in the paper, run this command:
 
 ```train
-python train.py --input-data <path_to_data> --alpha 10 --beta 20
+sh train.sh
 ```
 
 >📋  Describe the training details, including the full training procedure and appropriate hyperparameters.
@@ -44,7 +44,7 @@ python train.py --input-data <path_to_data> --alpha 10 --beta 20
 To evaluate my model on CMU-MOSEI, M3ED and MEmoR, run:
 
 ```eval
-python eval.py --model-file mymodel.pth --benchmark CMU-MOSEI
+inclued in train.sh
 ```
 
 >📋  Describe the evaluation process, and give commands that produce the results.
