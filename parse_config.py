@@ -7,6 +7,7 @@ from datetime import datetime
 from logger import setup_logging
 from utils import read_json, write_json
 import argparse
+import json
 
 
 class ConfigParser:
@@ -147,6 +148,9 @@ class ConfigParser:
         logger = logging.getLogger(name)
         logger.setLevel(self.log_levels[verbosity])
         return logger
+        
+    def print_config(self):
+        print(json.dumps(self.config, indent=4))
 
     # setting read-only attributes
     @property
