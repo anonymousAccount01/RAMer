@@ -186,13 +186,7 @@ def prep_dataloader(args):
         'test',
          args
     )
-    # text = train_dataset._get_text(0)
-    # visual = train_dataset._get_visual(0)
-    # audio = train_dataset._get_audio(0)
-    # labels = train_dataset._get_labels(0)
-    # print(f"text: {text}, visual: {visual}, audio: {audio}, labels: {labels}")
-    # print(f"text dimension: {text[0].shape}, visual dimension: {visual[0].shape}, audio dimension: {audio[0].shape}, labels dimension: {labels.shape}")
-    # pdb.set_trace()
+    
     label_input, label_mask = train_dataset._get_label_input()
     train_dataloader = DataLoader(
         train_dataset,
